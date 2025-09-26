@@ -1,0 +1,116 @@
+networks:
+  loki:
+
+volumes:
+  grafana:
+  loki:
+  minio:
+  htpasswd-data:
+
+services:
+  # Since the Loki containers are running as user 10001 and the mounted data volume is owned by root,
+  # Loki would not have permissions to create the directories.
+  # Therefore the init container changes permissions of the mounted directory.
+  init:
+    image: &lokiImage grafana/loki:latest
+    user: root
+    entrypoint:
+      - "chown"
+      - "10001:10001"
+      - "/loki"
+    volumes:
+      - loki:/loki
+    networks:
+      - loki
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+      - LOKI_DATASOURCE_AUTH_USER=${AUTH_BASIC_USER}
+      - LOKI_DATASOURCE_AUTH_PASS=${AUTH_BASIC_PASSWORD}
+    volumes:
+      - ./config/datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yml
+      - grafana:/var/lib/grafana
+    networks:
+      - loki
+
+  minio:
+    image: minio/minio
+    entrypoint:
+      - sh
+      - -euc
+      - |
+        mkdir -p /data/loki-data && \
+        minio server --address "0.0.0.0:9000" --console-address "0.0.0.0:9001" /data
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+      - MINIO_UPDATE=off
+    ports:
+      # - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio:/data
+    networks:
+      - loki
+
+  htpasswd-generator:
+    image: httpd:2.4
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        htpasswd -nbB ${AUTH_BASIC_USER} ${AUTH_BASIC_PASSWORD} > /htpasswd/.htpasswd
+    volumes:
+      - htpasswd-data:/htpasswd
+    networks:
+      - loki
+
+  loki-gateway:
+    image: nginx:alpine
+    volumes:
+      - ./config/nginx.conf:/etc/nginx/nginx.conf
+      - htpasswd-data:/etc/nginx
+    ports:
+      - "9200:80"      
+    networks:
+      - loki
+
+  loki-read:
+    image: *lokiImage
+    volumes:
+      - ./config/loki.yaml:/etc/loki/loki.yaml
+    command: "-config.file=/etc/loki/loki.yaml -target=read -legacy-read-mode=false"
+    networks:
+      - loki
+    restart: always
+    deploy:
+      mode: replicated
+      replicas: 1
+
+  loki-write:
+    image: *lokiImage
+    volumes:
+      - ./config/loki.yaml:/etc/loki/loki.yaml
+    command: "-config.file=/etc/loki/loki.yaml -target=write"
+    networks:
+      - loki
+    restart: always
+    deploy:
+      mode: replicated
+      replicas: 1
+
+  loki-backend:
+    image: *lokiImage
+    volumes:
+      - ./config/loki.yaml:/etc/loki/loki.yaml
+    command: "-config.file=/etc/loki/loki.yaml -target=backend -legacy-read-mode=false"
+    networks:
+      - loki
+    restart: always
+    deploy:
+      mode: replicated
+      replicas: 1
